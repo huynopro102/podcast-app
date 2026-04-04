@@ -10,7 +10,7 @@ use Spatie\QueryBuilder\QueryBuilder;
 
 class GetEpisodeListAction
 {
-    public function handle(?int $perPage): LengthAwarePaginator|Collection
+    public function handle(?int $perPage): LengthAwarePaginator
     {
         $query = QueryBuilder::for(Episode::query())
             ->allowedFilters([
