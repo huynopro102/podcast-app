@@ -1,0 +1,8 @@
+stages:
+  - test
+
+hello-job:
+  stage: test
+  script:
+    - echo "Chào bạn! Runner hp70602 đã chạy thành công."
+    - node -v
