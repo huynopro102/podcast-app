@@ -1,8 +1,96 @@
 stages:
-  - test
+  - info
+  - prepare
+  - build
+  - deploy
+  - healthcheck
+  - switch
 
-hello-job:
-  stage: test
+variables:
+  MAP_PATH: "/etc/nginx/conf.d/active_backend.map"
+  DOCKER_COMPOSE_FILE: "docker-compose.yml"
+
+# Template để tái sử dụng script
+.docker_login: &docker_login
+  before_script:
+    - docker info
+
+# 1. Kiểm tra môi trường Runner
+check_environment:
+  stage: info
+  tags:
+    - hp70602-runner
   script:
-    - echo "Chào bạn! Runner hp70602 đã chạy thành công."
-    - node -v
+    - whoami
+    - id
+    - pwd
+    - docker compose version
+
+# 2. Xác định Target (Blue hay Green)
+determine_target:
+  stage: prepare
+  tags:
+    - hp70602-runner
+  script:
+    - python3 deploy-zero-downtime.py > deploy.env
+    - cat deploy.env
+  artifacts:
+    reports:
+      dotenv: deploy.env # Chuyển biến TARGET và OLD sang các stage sau
+
+# 3. Build Docker Image
+build_app:
+  stage: build
+  tags:
+    - hp70602-runner
+  needs: ["determine_target"]
+  script:
+    # Lấy file .env từ GitLab CI/CD Variables (thay vì file secret của Jenkins)
+    - echo "$PROD_ENV_FILE" > .env
+    - docker compose build --no-cache $TARGET
+
+# 4. Deploy bản mới (Blue/Green)
+deploy_app:
+  stage: deploy
+  tags:
+    - hp70602-runner
+  needs: ["determine_target", "build_app"]
+  script:
+    - docker compose up -d $TARGET
+
+# 5. Kiểm tra sức khỏe (Health Check)
+verify_deployment:
+  stage: healthcheck
+  tags:
+    - hp70602-runner
+  needs: ["determine_target", "deploy_app"]
+  script:
+    - echo "--- Đang kiểm tra sức khỏe bản mới laravel-$TARGET ---"
+    - |
+      count=0
+      while [ $count -lt 10 ]; do
+        if docker exec laravel-$TARGET curl -s -f http://localhost/ > /dev/null; then
+          echo "--- [OK] Bản mới đã sẵn sàng! ---"
+          exit 0
+        fi
+        echo "App chưa sẵn sàng, đang thử lại lần $((count+1))..."
+        sleep 5
+        count=$((count+1))
+      done
+      exit 1
+  allow_failure: false
+
+# 6. Chuyển Traffic & Tắt bản cũ
+switch_traffic:
+  stage: switch
+  tags:
+    - hp70602-runner
+  needs: ["determine_target", "verify_deployment"]
+  script:
+    - echo "--- Chuyển Traffic sang $TARGET ---"
+    - echo "default laravel-$TARGET;" > $MAP_PATH
+    - docker exec nginx nginx -t
+    - docker exec nginx nginx -s reload
+    - echo "--- Tắt bản cũ laravel-$OLD ---"
+    - docker stop laravel-$OLD || true
+  when: manual # Chế độ Enterprise thường cần bấm nút xác nhận cuối cùng để chuyển traffic
